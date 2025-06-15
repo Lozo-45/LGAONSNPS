@@ -1,0 +1,313 @@
+import numpy as np
+from scipy.stats import t
+from opfunu.cec_based.cec2017 import F72017
+from scipy.stats import norm
+import math
+
+FunctionNum = 7
+nidm = 10
+CEC_function = F72017(ndim=nidm)
+CHAOS_PARAM = 3.57 + np.random.rand()*0.43
+def compute_fitness(function, matrix, maximize=False):
+    fitness_matrix = np.apply_along_axis(function.evaluate, 1, matrix)  
+    best_index_list = np.argsort(fitness_matrix)
+
+    if maximize:
+        best_fitness = fitness_matrix[best_index_list[-1]]  
+    else:
+        best_fitness = fitness_matrix[best_index_list[0]]  
+
+    return best_index_list, best_fitness, fitness_matrix
+
+
+
+def calculate_diversity(variable_matrix):
+    
+    mid_individual = np.mean(variable_matrix, axis=0)
+    
+    distances = np.sqrt(np.sum((variable_matrix - mid_individual) ** 2, axis=1))
+    
+    diversity = np.mean(distances)
+    return diversity
+
+
+def compute_gradient(function, best_member, h=1e-6, m=100):
+    n = len(best_member)  
+    original_x = best_member.copy()  
+    delta = h * (1 + np.abs(original_x))  
+    
+    perturbations = np.random.randn(n) 
+    f_plus = np.array([function.evaluate(original_x + delta * perturbations[i]) for i in range(n)])
+    f = function.evaluate(original_x)
+    gradient = np.sum((f_plus - f)[:, np.newaxis] * perturbations, axis=0) / (delta * m)
+    return gradient
+    
+def generate_chaos_sequence(length, CHAOS_PARAM):
+    
+    x = np.zeros(length)
+    x[0] = np.random.uniform(0.01, 0.99)  
+    r = CHAOS_PARAM
+    
+    for i in range(1, length):
+        x[i] = r * x[i-1] * (1 - x[i-1])
+        
+        x[i] = np.clip(x[i], 1e-6, 1-1e-6)  
+    return x
+
+Pop_size = 100
+D = nidm
+VariableMin = -100
+VariableMax = 100
+Pop_sizeMin = 20
+
+Iteration = 1
+MaxIteration = 10000 * D
+SelectPUpdate = 200  
+SizeR1 = 100
+Diversity_List = np.zeros(MaxIteration)  
+
+
+Weight1 = 0
+Weight2 = 0
+Weight3 = 0
+Rand_P_A = 0.33
+Rand_P_B = 0.66
+MCR = np.full(Pop_size, 0.5)
+MF = np.full(Pop_size, 0.5)
+k = 1
+
+
+VG_momentum = np.zeros((1, D))
+
+G_beta_min = max(0.3, 0.6 - 0.02 * D)  
+
+G_beta_max = 0.9
+
+Variable_Matrix = np.zeros((Pop_size, D))
+for i in range(Pop_size):
+    
+    chaos_seq = generate_chaos_sequence(D + 100, CHAOS_PARAM)[100:]  
+    
+    epsilon = 1e-8
+    normalized_seq = np.clip(chaos_seq, epsilon, 1-epsilon)
+    z_scores = norm.ppf(normalized_seq)
+    
+    Variable_Matrix[i] = VariableMin + (VariableMax - VariableMin) * (z_scores - np.min(z_scores)) / (np.max(z_scores) - np.min(z_scores))
+
+Archive = np.empty((0, Variable_Matrix.shape[1]))
+
+while True:
+    SizeR, SizeC = Variable_Matrix.shape
+
+    Best_Index_List, Best_fitness, _ = compute_fitness(CEC_function, Variable_Matrix, maximize=False)
+
+    random_indices = np.ceil(np.random.rand(SizeR) * np.maximum(2, np.random.rand(SizeR) * 0.2 * SizeR)).astype(int)
+    
+    Xpb = Variable_Matrix[Best_Index_List[random_indices - 1]]
+    
+    random_indices1 = np.random.randint(1, Variable_Matrix.shape[0] + 1, size=SizeR)
+    Xr1 = Variable_Matrix[random_indices1 - 1, :]
+    
+    P = np.vstack((Variable_Matrix, Archive))
+    random_indices2 = np.random.randint(1, Variable_Matrix.shape[0] + 1, size=SizeR)
+    Xr2 = Variable_Matrix[random_indices2 - 1, :]
+    
+    CR = np.random.randn(SizeR, 1) * np.sqrt(0.1) + MCR[np.random.randint(0, len(MCR), SizeR)].reshape(-1, 1)
+    E_CR = np.repeat(np.clip(CR, 0, 1), D).reshape(-1, D)
+    
+    #  F_List = t.rvs(df=1, size=SizeR) * np.sqrt(0.1) + np.random.choice(MF, size=SizeR)
+    #  F_List = np.clip(F_List, 0, 1)  
+    F = np.minimum(1, t.rvs(1, size=SizeR) * np.sqrt(0.1) + MF[np.random.randint(0, len(MF), SizeR)])
+    while np.any(F <= 0):
+        mask = F <= 0
+        F[mask] = np.minimum(1, t.rvs(1, size=np.sum(mask)) * np.sqrt(0.1) + MF[np.random.randint(0, len(MF), np.sum(mask))])
+    F = np.tile(F[:, np.newaxis], (1, D))
+
+    
+    if Iteration < MaxIteration / 2:
+        FList = 0.45 + 0.1 * np.random.rand(SizeR)
+    else:
+        FList = np.zeros(SizeR)
+        for i in range(SizeR):
+            Ri = np.random.randint(len(MF))
+            val = MF[Ri] + 0.1 * math.tan(math.pi * (np.random.rand() - 0.5))
+            while val <= 0:
+                val = MF[Ri] + 0.1 * math.tan(math.pi * (np.random.rand() - 0.5))
+            FList[i] = min(val, 1)
+    FList = np.tile(FList[:, np.newaxis], (1, D))
+    L,Z = FList.shape
+    Frandom = np.random.rand(L,Z)
+    Site = np.random.rand(*E_CR.shape) < E_CR
+
+    
+    VM_Last = Variable_Matrix.copy()
+    VM_MU = Variable_Matrix.copy()
+
+    Best_member = VM_Last[Best_Index_List[0], :]
+    E_Best_member = np.vstack([Best_member] * SizeR)
+    VariableGradient = compute_gradient(CEC_function, Best_member, h=1e-6)
+    G_beta = G_beta_min + (G_beta_max - G_beta_min) * (Iteration / MaxIteration)
+    VG_momentum = G_beta * VG_momentum + (1 - G_beta) * VariableGradient
+    # VG_momentum = VariableGradient / np.linalg.norm(VariableGradient)
+    E_VG_momentum = np.vstack([VG_momentum] * SizeR)
+  
+    
+    MOP1 = Rand_P_A
+    MOP2 = Rand_P_B - Rand_P_A
+    MOP3 = 1 - Rand_P_B
+    
+    NSite1 = round(SizeR * MOP1)
+    NSite2 = round(SizeR * MOP2)
+    NSite3 = SizeR - (NSite1 + NSite2)
+    
+    RandIndex = np.random.permutation(SizeR)
+    
+    RandIndex1 = RandIndex[:NSite1]
+    RandIndex2 = RandIndex[NSite1:NSite1 + NSite2]
+    RandIndex3 = RandIndex[NSite1 + NSite2:]
+    
+    Site1 = Site.copy()
+    Site2 = Site.copy()
+    Site3 = Site.copy()
+    
+    Site1[np.concatenate((RandIndex2, RandIndex3)), :] = 0
+   
+    Site2[np.concatenate((RandIndex1, RandIndex3)), :] = 0
+    
+    Site3[np.concatenate((RandIndex1, RandIndex2)), :] = 0
+   
+    OffDec = VM_Last.copy()
+
+   
+    VM_MU[Site1] = OffDec[Site1] + FList[Site1] * (Xpb[Site1] - OffDec[Site1] + Xr1[Site1] - Xr2[Site1])
+    VMMULogic = (VM_MU < VariableMin) | (VM_MU > VariableMax)
+    num_true = np.sum(VMMULogic)
+    VM_MU[VMMULogic] = np.round(VariableMin + (VariableMax - VariableMin) * np.random.rand(num_true), 2)
+
+    VM_MU[Site2] = OffDec[Site2] - FList[Site2] * E_VG_momentum[Site2] + FList[Site2] * (E_Best_member[Site2] - OffDec[Site2] + Xpb[Site2] - Xr2[Site2]) * np.random.rand() ** (1 - G_beta)
+    VMMULogic = (VM_MU < VariableMin) | (VM_MU > VariableMax)
+    num_true = np.sum(VMMULogic)
+    VM_MU[VMMULogic] = np.round(VariableMin + (VariableMax - VariableMin) * np.random.rand(num_true), 2)
+
+   
+    #VM_MU[Site3] = OffDec[Site3] + Frandom[Site3] * (OffDec[Site3] - VMMU31[Site3]) + FList[Site3] * (VMMU32[Site3] - VMMU33[Site3])
+    VM_MU[Site3] = OffDec[Site3] + Frandom[Site3] * (Xpb[Site3] - OffDec[Site3]) + FList[Site3] * (Xr1[Site3] - Xr2[Site3])
+    VMMULogic = (VM_MU < VariableMin) | (VM_MU > VariableMax)
+    num_true = np.sum(VMMULogic)
+    VM_MU[VMMULogic] = np.round(VariableMin + (VariableMax - VariableMin) * np.random.rand(num_true), 2)
+    _, _, Fitness_Matrix_Last = compute_fitness(CEC_function, VM_Last, maximize=False)
+    _, _, Fitness_Matrix_MU = compute_fitness(CEC_function, VM_MU, maximize=False)
+    Fitness_Delat_Matrix = Fitness_Matrix_Last - Fitness_Matrix_MU
+    Fitness_Delat_Matrix[Fitness_Delat_Matrix <= 0] = 0
+    Weight1 += np.sum(Fitness_Delat_Matrix[RandIndex1])  
+    Weight2 += np.sum(Fitness_Delat_Matrix[RandIndex2])  
+    Weight3 += np.sum(Fitness_Delat_Matrix[RandIndex3])
+
+    if Iteration > 1 and Iteration % SelectPUpdate == 0:
+        Weight1Bias = Rand_P_A
+        Weight2Bias = Rand_P_B
+        Rate = 1 - ((1 - Rand_P_B) / (1 - Rand_P_A))
+        #Rate = 1 - Weight2 / Weight3
+        SumW2W3 = Weight2 + Weight3
+        if (Weight1 == 0 and Weight2 == 0 and Weight3 == 0) or (Weight1 / (Weight1 + SumW2W3) == Weight1Bias):
+            Rand_P_A = Rand_P_A
+        else:
+            P_max = 0.9
+            P_min = 0.2
+            X = (Weight1 / (Weight1 + SumW2W3) - Weight1Bias) / abs(Weight1 / (Weight1 + SumW2W3) - Weight1Bias)
+            P = X * (P_max - P_min) / 2 + (P_max + P_min) / 2
+            Delt = (P - Rand_P_A) / 10
+            Rand_P_A += Delt
+        if Weight2 == Weight3:
+            Rand_P_B = Rand_P_A + (1 - Rand_P_A) * Rate
+        else:
+            P_max = 0.99
+            P_min = Rand_P_A + 0.1
+            X = (Weight2 / (Weight2 + Weight3) - Weight2Bias) / abs(Weight2 / (Weight2 + Weight3) - Weight2Bias)
+            #X = (Weight2 / (Weight1 + SumW2W3) - Weight2Bias) / abs(Weight2 / (Weight1 + SumW2W3) - Weight2Bias)
+            P = X * (P_max - P_min) / 2 + (P_max + P_min) / 2
+            Rand_P_B = Rand_P_A + (1 - Rand_P_A) * Rate
+            Delt = (P - Rand_P_B) / 10
+            Rand_P_B += Delt
+        Weight1 = 0
+        Weight2 = 0
+        Weight3 = 0
+
+    replace = Fitness_Delat_Matrix > 0
+
+    Archive = np.vstack([Archive, VM_Last[replace]])
+
+    Archive = Archive[np.random.permutation(Archive.shape[0])[:min(Archive.shape[0], SizeR)]]
+
+    Variable_Matrix[replace] = VM_MU[replace]
+    if np.any(replace):
+
+        w = Fitness_Delat_Matrix[replace] / np.sum(Fitness_Delat_Matrix[replace])
+        MCR[k] = np.dot(w.T, E_CR[replace, 0])
+        MF[k] = np.dot(w.T, FList[replace, 0] ** 2) / np.dot(w.T, FList[replace, 0])
+        k = k % len(MCR)
+
+
+    BestIndexList, BestFitness, FitnessMatrixLast = compute_fitness(CEC_function, Variable_Matrix, maximize=False)
+
+    Pop_sizeG, _ = Variable_Matrix.shape
+
+
+    Pop_sizeNext = round(((Pop_sizeMin - Pop_size) / MaxIteration) * Iteration + Pop_size)
+
+    Temp4 = Pop_sizeG - Pop_sizeNext  # Positive value since Pop_sizeNext < Pop_sizeG
+
+
+    while Temp4 > 0:
+
+        current_BestIndexList = list(BestIndexList.copy())
+
+        to_delete = []
+
+        del_position = len(current_BestIndexList) - Temp4 + np.random.randint(0, Temp4)
+        DelIndex = current_BestIndexList[del_position]  
+        to_delete.append(DelIndex)  
+  
+        current_BestIndexList.remove(DelIndex)
+
+        Variable_Matrix = np.delete(Variable_Matrix, to_delete, axis=0)
+        FList = np.delete(FList, to_delete, axis=0)
+        E_CR = np.delete(E_CR, to_delete, axis=0)
+        MCR = np.delete(MCR, to_delete, axis=0)
+        MF = np.delete(MF, to_delete, axis=0)
+
+        Temp4 -= 1
+
+
+    BestIndexList_D, _, _ = compute_fitness(CEC_function, Variable_Matrix, maximize=False)
+    SizeR2, SizeC2 = Variable_Matrix.shape
+    Diversity = calculate_diversity(Variable_Matrix)
+    Diversity_List[Iteration - 1] = Diversity  
+
+    if Iteration == 100:
+        DiversityInit = Diversity
+    if Iteration > 100:
+
+        Pm = Diversity / DiversityInit
+
+        if np.random.rand() > Pm:
+
+            Worst_Index = BestIndexList_D[SizeR // 2:]
+            MaxColumnVM = np.max(Variable_Matrix, axis=0)
+            MinColumnVM = np.min(Variable_Matrix, axis=0)
+            MaxColumnVM = MaxColumnVM + 50
+            MaxColumnVM = np.minimum(MaxColumnVM, VariableMax)
+            MinColumnVM = MinColumnVM - 50
+            MinColumnVM = np.maximum(MinColumnVM, VariableMin)
+            for i in Worst_Index:
+                for j in range(SizeC):
+                    if np.random.rand() < 0.9:
+                        Variable_Matrix[i, j] = np.round(
+                            MinColumnVM[j] + (MaxColumnVM[j] - MinColumnVM[j]) * np.random.rand(), 2)
+    print(f'第{Iteration}次迭代***种群规模:{len(Variable_Matrix)}***最优适应度:{BestFitness:.10f}***多样性:'
+          f'{Diversity:.6f}***概率1:{Rand_P_A:.6f}***概率2:{Rand_P_B:.6f}')
+    if BestFitness < FunctionNum * 100 + 10 ** -9:
+        break
+    if Iteration > MaxIteration:
+        break  
+    Iteration += 1
